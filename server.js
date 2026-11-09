@@ -11,10 +11,20 @@ dotenv.config();
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
 const transporte = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // true para puerto 465, false para 587
     auth: {
         user: process.env.GMAIL_USER,
         pass: process.env.GMAIL_PASS
+    }
+});
+// Verificar la conexión de correo al encender el servidor
+transporte.verify(function (error, success) {
+    if (error) {
+        console.error("❌ Error en la configuración de Nodemailer/Gmail:", error);
+    } else {
+        console.log("✅ El servidor de correo está listo para enviar mensajes");
     }
 });
 
@@ -138,7 +148,7 @@ app.post('/webhook', async (req, res) => {
 
                     await transporte.sendMail({
                         from: "puntonorte.mkt@gmail.com",
-                        to: 'shonehund5@gmail.com',
+                        to: emailComprador,
                         subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
                         text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
                         attachments: [
