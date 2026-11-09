@@ -129,7 +129,7 @@ app.post('/webhook', async (req, res) => {
                 const tituloResumen = paymentData.additional_info?.items?.[0]?.title || "Resumen Universitario";
                 
                 // Recuperamos la URL del PDF desde la metadata
-                const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf";[cite: 2]
+                const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf";
 
                 console.log(`📥 Descargando PDF para enviar a: ${emailComprador}`);
                 const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
