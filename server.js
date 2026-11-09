@@ -22,8 +22,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const BACKEND_URL = process.env.BACKEND_URL;
 
-// El frontend manda la URL completa del PDF. Solo aceptamos URLs de este repo.
-const PDF_BASE = "https://raw.githubusercontent.com/SalvaZum/pfds/main/";
+// El frontend manda la URL completa del PDF (campo urlPDF de Firestore).
 
 // ------------------------------------------------------------
 // Mercado Pago y Gmail
@@ -61,13 +60,20 @@ app.use(cors());
 // ------------------------------------------------------------
 const emailValido = (e) => typeof e === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
 
-// Solo URLs de tu repo de GitHub que terminen en .pdf
-const urlPdfValida = (s) =>
-    typeof s === "string" &&
-    s.length <= 300 &&
-    s.startsWith(PDF_BASE) &&
-    /\.pdf$/i.test(s) &&
-    !s.includes("..");
+// Solo URLs https de raw.githubusercontent.com que terminen en .pdf
+const urlPdfValida = (s) => {
+    if (typeof s !== "string" || s.length > 500) return false;
+    try {
+        const u = new URL(s);
+        return (
+            u.protocol === "https:" &&
+            u.hostname === "raw.githubusercontent.com" &&
+            /\.pdf$/i.test(u.pathname)
+        );
+    } catch {
+        return false;
+    }
+};
 
 const nombreArchivoSeguro = (s) =>
     String(s).replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 100) || "resumen";
