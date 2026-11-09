@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import crypto from "crypto";
 import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
-import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -11,8 +10,9 @@ dotenv.config();
  * Variables de entorno (en Render -> Environment)
  * ------------------------------------------------------------
  * MP_ACCESS_TOKEN=...
- * GMAIL_USER=puntonorte.mkt@gmail.com
- * GMAIL_PASS=...                 (contraseña de APLICACIÓN)
+ * BREVO_API_KEY=...              (API key de Brevo, empieza con xkeysib-)
+ * MAIL_FROM=puntonorte.mkt@gmail.com   (remitente VERIFICADO en Brevo)
+ * MAIL_FROM_NAME=Punto Norte
  * BACKEND_URL=https://tu-backend.onrender.com
  * FRONTEND_URL=https://tu-app.vercel.app
  * MP_WEBHOOK_SECRET=...          (opcional)
@@ -25,27 +25,44 @@ const BACKEND_URL = process.env.BACKEND_URL;
 // El frontend manda la URL completa del PDF (campo urlPDF de Firestore).
 
 // ------------------------------------------------------------
-// Mercado Pago y Gmail
+// Mercado Pago
 // ------------------------------------------------------------
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
-const transporte = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 587,
-    secure: false,
-    auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_PASS,
-    },
-});
+// ------------------------------------------------------------
+// Envío de mails por API HTTP (Brevo).
+// Render (plan gratis) bloquea SMTP, por eso no usamos nodemailer.
+// ------------------------------------------------------------
+async function enviarEmail({ to, subject, text, attachments = [] }) {
+    const respuesta = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        headers: {
+            "api-key": process.env.BREVO_API_KEY,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+        },
+        body: JSON.stringify({
+            sender: {
+                name: process.env.MAIL_FROM_NAME || "Punto Norte",
+                email: process.env.MAIL_FROM,
+            },
+            to: [{ email: to }],
+            subject,
+            textContent: text,
+            attachment: attachments.map((a) => ({
+                name: a.filename,
+                content: a.content.toString("base64"),
+            })),
+        }),
+        signal: AbortSignal.timeout(30000),
+    });
 
-transporte.verify((error) => {
-    if (error) {
-        console.error("❌ Error en la configuración de Nodemailer/Gmail:", error);
-    } else {
-        console.log("✅ El servidor de correo está listo para enviar mensajes");
+    if (!respuesta.ok) {
+        const detalle = await respuesta.text();
+        throw new Error(`Brevo respondió ${respuesta.status}: ${detalle}`);
     }
-});
+    return respuesta.json();
+}
 
 // ------------------------------------------------------------
 // Express
@@ -140,9 +157,20 @@ app.post("/create_preference", async (req, res) => {
     try {
         const { title, price, id, pdfUrl } = req.body;
 
-        if (!title || !(Number(price) > 0) || !/^\d+$/.test(String(id)) || !urlPdfValida(pdfUrl)) {
-            console.error("❌ create_preference: datos inválidos", req.body);
-            return res.status(400).json({ error: "Datos del producto inválidos" });
+        const invalidos = [];
+        if (!title) invalidos.push("title");
+        if (!(Number(price) > 0)) invalidos.push("price");
+        if (id === undefined || id === null || String(id).length === 0 || String(id).length > 100) {
+            invalidos.push("id");
+        }
+        if (!urlPdfValida(pdfUrl)) invalidos.push("pdfUrl");
+
+        if (invalidos.length > 0) {
+            console.error("❌ create_preference: campos inválidos:", invalidos, "body:", JSON.stringify(req.body));
+            return res.status(400).json({
+                error: "Datos del producto inválidos",
+                campos: invalidos,
+            });
         }
 
         const body = {
@@ -240,8 +268,7 @@ app.post("/webhook", async (req, res) => {
 
             if (emailComprador) {
                 console.log(`📧 Enviando "${titulo}" a ${emailComprador}`);
-                await transporte.sendMail({
-                    from: `"Punto Norte" <${process.env.GMAIL_USER}>`,
+                await enviarEmail({
                     to: emailComprador,
                     subject: `¡Tu resumen de ${titulo} ya está aquí! 🎓`,
                     text: `¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen de ${titulo} en formato PDF.`,
@@ -251,9 +278,8 @@ app.post("/webhook", async (req, res) => {
             } else {
                 // Respaldo: MP no devolvió email. Te lo mandamos a vos para que lo reenvíes.
                 console.error(`⚠️ Pago ${key} sin email del comprador. Se envía el PDF al dueño.`);
-                await transporte.sendMail({
-                    from: `"Punto Norte" <${process.env.GMAIL_USER}>`,
-                    to: process.env.GMAIL_USER,
+                await enviarEmail({
+                    to: process.env.MAIL_FROM,
                     subject: `⚠️ Pago ${key} aprobado SIN email del comprador`,
                     text:
                         `Mercado Pago no informó el email del comprador.\n` +
