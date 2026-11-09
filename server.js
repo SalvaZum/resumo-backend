@@ -1,26 +1,58 @@
 import express from "express";
 import cors from "cors";
-import { MercadoPagoConfig, Preference } from 'mercadopago';
-import nodemailer from 'nodemailer';
-import { Buffer } from 'buffer';
-import dotenv from 'dotenv';
+import crypto from "crypto";
+import { MercadoPagoConfig, Preference, Payment } from "mercadopago";
+import nodemailer from "nodemailer";
+import dotenv from "dotenv";
 
 dotenv.config();
 
-// Agrega credenciales
+/* ============================================================
+ * Variables de entorno (en Render -> Environment)
+ * ------------------------------------------------------------
+ * MP_ACCESS_TOKEN=...
+ * GMAIL_USER=puntonorte.mkt@gmail.com
+ * GMAIL_PASS=...                 (contraseña de APLICACIÓN)
+ * BACKEND_URL=https://tu-backend.onrender.com
+ * FRONTEND_URL=https://tu-app.vercel.app
+ * MP_WEBHOOK_SECRET=...          (opcional)
+ * ============================================================ */
+
+const PORT = process.env.PORT || 3000;
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const BACKEND_URL = process.env.BACKEND_URL;
+
+// ------------------------------------------------------------
+// CATÁLOGO: la clave es el `id` del producto en tu frontend.
+// El PDF y el precio los define el servidor (no el navegador).
+// COMPLETÁ UNA ENTRADA POR CADA RESUMEN.
+// ------------------------------------------------------------
+const PDF_BASE = "https://raw.githubusercontent.com/SalvaZum/pfds/main/";
+const CATALOGO = {
+    "1": {
+        title: "Algebra Lineal",
+        price: 2500,
+        pdfUrl: `${PDF_BASE}algebra-lineal.pdf`, // <-- nombre real del archivo en GitHub
+    },
+    // "2": { title: "Análisis Matemático I", price: 2500, pdfUrl: `${PDF_BASE}analisis-1.pdf` },
+};
+
+// ------------------------------------------------------------
+// Mercado Pago y Gmail
+// ------------------------------------------------------------
 const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 
 const transporte = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true, // true para puerto 465, false para 587
+    host: "smtp.gmail.com",
+    port: 587,
+    secure: false,
     auth: {
         user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_PASS
-    }
+        pass: process.env.GMAIL_PASS,
+    },
 });
-// Verificar la conexión de correo al encender el servidor
-transporte.verify(function (error, success) {
+
+transporte.verify((error) => {
     if (error) {
         console.error("❌ Error en la configuración de Nodemailer/Gmail:", error);
     } else {
@@ -28,152 +60,216 @@ transporte.verify(function (error, success) {
     }
 });
 
-// Crear una nueva aplicacion en express
+// ------------------------------------------------------------
+// Express
+// ------------------------------------------------------------
 const app = express();
-
-// Configuraciones
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(cors());
 
-// Función auxiliar para descargar el PDF desde GitHub y convertirlo en Buffer
+// ------------------------------------------------------------
+// Helpers
+// ------------------------------------------------------------
+const emailValido = (e) => typeof e === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+
+const nombreArchivoSeguro = (s) =>
+    String(s).replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 100) || "resumen";
+
 async function obtenerPdfBuffer(pdfUrl) {
     const response = await fetch(pdfUrl);
     if (!response.ok) {
-        throw new Error(`No se pudo descargar el PDF desde GitHub: ${response.statusText}`);
+        throw new Error(`No se pudo descargar el PDF (${response.status}) desde ${pdfUrl}`);
     }
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return Buffer.from(await response.arrayBuffer());
 }
 
-// End-point create preference
-app.post('/create_preference', async (req, res)=>{
-    try{
-        // Ahora también recibimos la url del pdf desde el frontend
-        const { title, price, id, pdfUrl } = req.body;
+// Busca el email del comprador en todos los lugares donde MP puede traerlo
+function obtenerEmailComprador(pago) {
+    const candidatos = [
+        pago.payer?.email,
+        pago.additional_info?.payer?.email,
+        pago.metadata?.email,
+    ];
+    return candidatos.find(emailValido)?.trim() || null;
+}
 
-        const preference = new Preference(client);
-        const result = await preference.create({
-            body: {
-                items: [
-                {
-                    title: String(title),
-                    unit_price: Number(price),
-                    quantity: Number(1),
-                    id: Number(id),
-                    currency_id: 'ARS'
-                }
-                ],
-                // Guardamos la URL de GitHub en metadata para recuperarla en el webhook
-                metadata: {
-                    pdf_url: pdfUrl || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf" //[cite: 2] fallback por defecto
-                },
-                back_urls: {
-                    success: "http://localhost:5173/",
-                    failure: "http://localhost:5173/",
-                    pending: "http://localhost:5173/",
-                }
-            }
-        });
+// Idempotencia en memoria (se pierde si Render reinicia el servicio)
+const pagosProcesados = new Set();
+const pagosEnProceso = new Set();
 
-        res.json({ init_point: result.init_point });
-    } catch(err){
-        console.error("DETALLE DEL ERROR DE MP:", JSON.stringify(err, null, 2));
-        res.status(500).json({ error: "Error al crear la preferencia de pago", details: err.message });
+// Validación de firma del webhook (solo si definís MP_WEBHOOK_SECRET)
+function firmaValida(req) {
+    const secret = process.env.MP_WEBHOOK_SECRET;
+    if (!secret) return true;
+
+    const xSignature = req.get("x-signature");
+    const xRequestId = req.get("x-request-id");
+    if (!xSignature) return false;
+
+    let ts, v1;
+    for (const part of xSignature.split(",")) {
+        const [k, v] = part.split("=").map((s) => s.trim());
+        if (k === "ts") ts = v;
+        if (k === "v1") v1 = v;
     }
-});
+    if (!ts || !v1) return false;
 
-// End-point send-summary (Para pruebas directas si lo requieres)
-app.post('/send-summary', async (req, res)=>{
-    const { email, title, pdfUrl } = req.body;
-    try{
-        // URL por defecto de respaldo si no mandan una
-        const urlFinal = pdfUrl || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf"; //[cite: 2]
-        
-        // Descargamos el PDF de GitHub en memoria
-        const pdfBuffer = await obtenerPdfBuffer(urlFinal);
+    const dataId = String(req.query["data.id"] ?? req.body?.data?.id ?? "").toLowerCase();
 
-        await transporte.sendMail({
-            from: "puntonorte.mkt@gmail.com",
-            to: email,
-            subject: `¡Tu resumen de ${title} ya está disponible! 🎓`,
-            text: `¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás el resumen académico de ${title} en formato PDF.`,
-            attachments: [
-                {
-                    filename: `${title}.pdf`,
-                    content: pdfBuffer // Archivo dinámico desde GitHub
-                }
-            ]
-        });
+    let manifest = "";
+    if (dataId) manifest += `id:${dataId};`;
+    if (xRequestId) manifest += `request-id:${xRequestId};`;
+    manifest += `ts:${ts};`;
 
-        res.json({ success: true, message: "Correo enviado con éxito" });
-    } catch(err){
-        console.log(err);
-        res.status(500).json({ error: "Error al enviar el correo" });
-    }
-});
-
-// Endpoint Webhook
-// Endpoint Webhook
-app.post('/webhook', async (req, res) => {
-    const paymentInfo = req.body;
-    console.log("🔔 Webhook recibido de Mercado Pago:", JSON.stringify(paymentInfo));
-
+    const esperado = crypto.createHmac("sha256", secret).update(manifest).digest("hex");
     try {
-        // Mercado Pago puede enviar el ID en diferentes estructuras según la versión
-        const paymentId = paymentInfo.data?.id || paymentInfo.id;
-        const topic = paymentInfo.type || paymentInfo.topic;
+        return crypto.timingSafeEqual(Buffer.from(esperado), Buffer.from(v1));
+    } catch {
+        return false;
+    }
+}
 
-        if (paymentId && (topic === 'payment' || paymentInfo.action === 'payment.created')) {
-            const response = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-                headers: {
-                    'Authorization': `Bearer ${client.accessToken}`
-                }
-            });
-            const paymentData = await response.json();
+// ------------------------------------------------------------
+// POST /create_preference
+// Recibe lo mismo que ya manda tu frontend: { title, price, id }
+// Solo usamos el `id`; título, precio y PDF salen del catálogo.
+// ------------------------------------------------------------
+app.post("/create_preference", async (req, res) => {
+    try {
+        const { id } = req.body;
+        const producto = CATALOGO[String(id)];
 
-            console.log(`🔍 Estado del pago ${paymentId}:`, paymentData.status);
-
-            if (paymentData.status === 'approved') {
-                const emailComprador = paymentData.payer?.email || paymentData.metadata?.email; 
-                const tituloResumen = paymentData.additional_info?.items?.[0]?.title || "Resumen Universitario";
-                
-                const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf"
-
-                console.log(`📥 Descargando PDF desde: ${pdfUrl}`);
-                
-                try {
-                    const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
-                    console.log(`📄 PDF descargado con éxito. Enviando correo a: ${emailComprador}`);
-
-                    await transporte.sendMail({
-                        from: "puntonorte.mkt@gmail.com",
-                        to: emailComprador,
-                        subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
-                        text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
-                        attachments: [
-                            {
-                                filename: `${tituloResumen}.pdf`,
-                                content: pdfBuffer
-                            }
-                        ]
-                    });
-
-                    console.log(`✅ ¡Correo enviado con éxito a ${emailComprador}!`);
-                } catch (emailError) {
-                    console.error("❌ ERROR CRÍTICO AL DESCARGAR O ENVIAR:", emailError);
-                }
-            }
+        if (!producto) {
+            console.error(`❌ create_preference: id ${id} no está en el CATALOGO`);
+            return res.status(400).json({ error: "Producto inexistente" });
         }
 
-        // Siempre responder 200 rápidamente a Mercado Pago para que no reintente el webhook
-        res.status(200).send("Webhook recibido");
-    } catch (error) {
-        console.error("❌ Error al procesar el webhook:", error);
-        res.status(500).send("Error interno");
+        const body = {
+            items: [
+                {
+                    id: String(id),
+                    title: producto.title,
+                    unit_price: Number(producto.price),
+                    quantity: 1,
+                    currency_id: "ARS",
+                },
+            ],
+            external_reference: `${id}-${Date.now()}`,
+            // Guardamos qué producto es para recuperarlo en el webhook
+            metadata: {
+                product_id: String(id),
+            },
+            back_urls: {
+                success: `${FRONTEND_URL}/`,
+                failure: `${FRONTEND_URL}/`,
+                pending: `${FRONTEND_URL}/`,
+            },
+        };
+
+        if (BACKEND_URL) {
+            body.notification_url = `${BACKEND_URL}/webhook`;
+        }
+
+        const result = await new Preference(client).create({ body });
+        res.json({ init_point: result.init_point });
+    } catch (err) {
+        console.error("DETALLE DEL ERROR DE MP:", JSON.stringify(err, null, 2));
+        res.status(500).json({
+            error: "Error al crear la preferencia de pago",
+            details: err.message,
+        });
     }
 });
 
-app.listen(process.env.PORT, ()=>{
-    console.log("El servidor corre en el puerto 3000");
+// ------------------------------------------------------------
+// POST /webhook
+// ------------------------------------------------------------
+app.post("/webhook", async (req, res) => {
+    console.log("🔔 Webhook recibido:", JSON.stringify(req.body));
+
+    if (!firmaValida(req)) {
+        console.error("❌ Firma de webhook inválida");
+        return res.sendStatus(401);
+    }
+
+    // Respondemos 200 ya para que MP no reintente mientras procesamos
+    res.status(200).send("Webhook recibido");
+
+    try {
+        const paymentId = req.body?.data?.id || req.query["data.id"] || req.body?.id;
+        const topic = req.body?.type || req.body?.topic || req.query?.type;
+
+        if (!paymentId || topic !== "payment") return;
+
+        const key = String(paymentId);
+        if (pagosProcesados.has(key) || pagosEnProceso.has(key)) {
+            console.log(`↩️ Pago ${key} ya procesado o en proceso, se ignora`);
+            return;
+        }
+        pagosEnProceso.add(key);
+
+        try {
+            const pago = await new Payment(client).get({ id: key });
+            console.log(`🔍 Estado del pago ${key}:`, pago.status);
+
+            if (pago.status !== "approved") return;
+
+            // Para diagnosticar: qué datos del comprador mandó MP
+            console.log("👤 Datos del pagador:", JSON.stringify({
+                payer: pago.payer,
+                additional_info_payer: pago.additional_info?.payer,
+                metadata: pago.metadata,
+            }));
+
+            const productId = pago.metadata?.product_id ?? pago.additional_info?.items?.[0]?.id;
+            const producto = CATALOGO[String(productId)];
+            if (!producto) {
+                console.error(`❌ Pago ${key}: producto "${productId}" no está en el CATALOGO`);
+                return;
+            }
+
+            const emailComprador = obtenerEmailComprador(pago);
+            const pdfBuffer = await obtenerPdfBuffer(producto.pdfUrl);
+            const adjunto = [{ filename: `${nombreArchivoSeguro(producto.title)}.pdf`, content: pdfBuffer }];
+
+            if (emailComprador) {
+                console.log(`📧 Enviando "${producto.title}" a ${emailComprador}`);
+                await transporte.sendMail({
+                    from: `"Punto Norte" <${process.env.GMAIL_USER}>`,
+                    to: emailComprador,
+                    subject: `¡Tu resumen de ${producto.title} ya está aquí! 🎓`,
+                    text: `¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen de ${producto.title} en formato PDF.`,
+                    attachments: adjunto,
+                });
+                console.log(`✅ Correo enviado con éxito a ${emailComprador} (pago ${key})`);
+            } else {
+                // Respaldo: MP no devolvió email. Te lo mandamos a vos para que lo reenvíes.
+                console.error(`⚠️ Pago ${key} sin email del comprador. Se envía el PDF al dueño.`);
+                await transporte.sendMail({
+                    from: `"Punto Norte" <${process.env.GMAIL_USER}>`,
+                    to: process.env.GMAIL_USER,
+                    subject: `⚠️ Pago ${key} aprobado SIN email del comprador`,
+                    text:
+                        `Mercado Pago no informó el email del comprador.\n` +
+                        `Producto: ${producto.title}\n` +
+                        `Pago: ${key}\n` +
+                        `Nombre: ${pago.payer?.first_name ?? "-"} ${pago.payer?.last_name ?? ""}\n` +
+                        `Documento: ${pago.payer?.identification?.number ?? "-"}\n\n` +
+                        `Reenviale el PDF adjunto manualmente.`,
+                    attachments: adjunto,
+                });
+            }
+
+            pagosProcesados.add(key);
+        } finally {
+            pagosEnProceso.delete(key);
+        }
+    } catch (error) {
+        console.error("❌ Error al procesar el webhook:", error);
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`El servidor corre en el puerto ${PORT}`);
 });
