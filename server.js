@@ -22,20 +22,8 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const BACKEND_URL = process.env.BACKEND_URL;
 
-// ------------------------------------------------------------
-// CATÁLOGO: la clave es el `id` del producto en tu frontend.
-// El PDF y el precio los define el servidor (no el navegador).
-// COMPLETÁ UNA ENTRADA POR CADA RESUMEN.
-// ------------------------------------------------------------
+// El frontend manda la URL completa del PDF. Solo aceptamos URLs de este repo.
 const PDF_BASE = "https://raw.githubusercontent.com/SalvaZum/pfds/main/";
-const CATALOGO = {
-    "1": {
-        title: "Algebra Lineal",
-        price: 2500,
-        pdfUrl: `${PDF_BASE}algebra-lineal.pdf`, // <-- nombre real del archivo en GitHub
-    },
-    // "2": { title: "Análisis Matemático I", price: 2500, pdfUrl: `${PDF_BASE}analisis-1.pdf` },
-};
 
 // ------------------------------------------------------------
 // Mercado Pago y Gmail
@@ -72,6 +60,14 @@ app.use(cors());
 // Helpers
 // ------------------------------------------------------------
 const emailValido = (e) => typeof e === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+
+// Solo URLs de tu repo de GitHub que terminen en .pdf
+const urlPdfValida = (s) =>
+    typeof s === "string" &&
+    s.length <= 300 &&
+    s.startsWith(PDF_BASE) &&
+    /\.pdf$/i.test(s) &&
+    !s.includes("..");
 
 const nombreArchivoSeguro = (s) =>
     String(s).replace(/[\\/:*?"<>|]/g, "").trim().slice(0, 100) || "resumen";
@@ -132,33 +128,33 @@ function firmaValida(req) {
 
 // ------------------------------------------------------------
 // POST /create_preference
-// Recibe lo mismo que ya manda tu frontend: { title, price, id }
-// Solo usamos el `id`; título, precio y PDF salen del catálogo.
+// Recibe lo que manda tu frontend: { title, price, id }
 // ------------------------------------------------------------
 app.post("/create_preference", async (req, res) => {
     try {
-        const { id } = req.body;
-        const producto = CATALOGO[String(id)];
+        const { title, price, id, pdfUrl } = req.body;
 
-        if (!producto) {
-            console.error(`❌ create_preference: id ${id} no está en el CATALOGO`);
-            return res.status(400).json({ error: "Producto inexistente" });
+        if (!title || !(Number(price) > 0) || !/^\d+$/.test(String(id)) || !urlPdfValida(pdfUrl)) {
+            console.error("❌ create_preference: datos inválidos", req.body);
+            return res.status(400).json({ error: "Datos del producto inválidos" });
         }
 
         const body = {
             items: [
                 {
                     id: String(id),
-                    title: producto.title,
-                    unit_price: Number(producto.price),
+                    title: String(title),
+                    unit_price: Number(price),
                     quantity: 1,
                     currency_id: "ARS",
                 },
             ],
             external_reference: `${id}-${Date.now()}`,
-            // Guardamos qué producto es para recuperarlo en el webhook
+            // Lo guardamos para recuperarlo en el webhook
             metadata: {
                 product_id: String(id),
+                title: String(title),
+                pdf_url: String(pdfUrl),
             },
             back_urls: {
                 success: `${FRONTEND_URL}/`,
@@ -223,23 +219,26 @@ app.post("/webhook", async (req, res) => {
             }));
 
             const productId = pago.metadata?.product_id ?? pago.additional_info?.items?.[0]?.id;
-            const producto = CATALOGO[String(productId)];
-            if (!producto) {
-                console.error(`❌ Pago ${key}: producto "${productId}" no está en el CATALOGO`);
+            const titulo = pago.metadata?.title ?? pago.additional_info?.items?.[0]?.title ?? "Resumen";
+
+            const pdfUrl = pago.metadata?.pdf_url;
+            if (!urlPdfValida(pdfUrl)) {
+                console.error(`❌ Pago ${key}: pdf_url inválida o ausente en metadata (producto ${productId})`, pdfUrl);
                 return;
             }
-
             const emailComprador = obtenerEmailComprador(pago);
-            const pdfBuffer = await obtenerPdfBuffer(producto.pdfUrl);
-            const adjunto = [{ filename: `${nombreArchivoSeguro(producto.title)}.pdf`, content: pdfBuffer }];
+
+            console.log(`📥 Descargando PDF desde: ${pdfUrl}`);
+            const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
+            const adjunto = [{ filename: `${nombreArchivoSeguro(titulo)}.pdf`, content: pdfBuffer }];
 
             if (emailComprador) {
-                console.log(`📧 Enviando "${producto.title}" a ${emailComprador}`);
+                console.log(`📧 Enviando "${titulo}" a ${emailComprador}`);
                 await transporte.sendMail({
                     from: `"Punto Norte" <${process.env.GMAIL_USER}>`,
                     to: emailComprador,
-                    subject: `¡Tu resumen de ${producto.title} ya está aquí! 🎓`,
-                    text: `¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen de ${producto.title} en formato PDF.`,
+                    subject: `¡Tu resumen de ${titulo} ya está aquí! 🎓`,
+                    text: `¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen de ${titulo} en formato PDF.`,
                     attachments: adjunto,
                 });
                 console.log(`✅ Correo enviado con éxito a ${emailComprador} (pago ${key})`);
@@ -252,7 +251,7 @@ app.post("/webhook", async (req, res) => {
                     subject: `⚠️ Pago ${key} aprobado SIN email del comprador`,
                     text:
                         `Mercado Pago no informó el email del comprador.\n` +
-                        `Producto: ${producto.title}\n` +
+                        `Producto: ${titulo}\n` +
                         `Pago: ${key}\n` +
                         `Nombre: ${pago.payer?.first_name ?? "-"} ${pago.payer?.last_name ?? ""}\n` +
                         `Documento: ${pago.payer?.identification?.number ?? "-"}\n\n` +
