@@ -128,26 +128,31 @@ app.post('/webhook', async (req, res) => {
                 const emailComprador = paymentData.payer?.email || paymentData.metadata?.email; 
                 const tituloResumen = paymentData.additional_info?.items?.[0]?.title || "Resumen Universitario";
                 
-                // Recuperamos la URL del PDF desde la metadata
-                const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf";
+                const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf"
 
-                console.log(`📥 Descargando PDF para enviar a: ${emailComprador}`);
-                const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
+                console.log(`📥 Descargando PDF desde: ${pdfUrl}`);
+                
+                try {
+                    const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
+                    console.log(`📄 PDF descargado con éxito. Enviando correo a: ${emailComprador}`);
 
-                await transporte.sendMail({
-                    from: "puntonorte.mkt@gmail.com",
-                    to: emailComprador,
-                    subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
-                    text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
-                    attachments: [
-                        {
-                            filename: `${tituloResumen}.pdf`,
-                            content: pdfBuffer
-                        }
-                    ]
-                });
+                    await transporte.sendMail({
+                        from: "puntonorte.mkt@gmail.com",
+                        to: emailComprador,
+                        subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
+                        text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
+                        attachments: [
+                            {
+                                filename: `${tituloResumen}.pdf`,
+                                content: pdfBuffer
+                            }
+                        ]
+                    });
 
-                console.log(`✅ ¡Pago aprobado y PDF de GitHub enviado con éxito a ${emailComprador}!`);
+                    console.log(`✅ ¡Correo enviado con éxito a ${emailComprador}!`);
+                } catch (emailError) {
+                    console.error("❌ ERROR CRÍTICO AL DESCARGAR O ENVIAR:", emailError);
+                }
             }
         }
 
