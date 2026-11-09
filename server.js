@@ -104,49 +104,54 @@ app.post('/send-summary', async (req, res)=>{
 });
 
 // Endpoint Webhook
+// Endpoint Webhook
 app.post('/webhook', async (req, res) => {
     const paymentInfo = req.body;
+    console.log("🔔 Webhook recibido de Mercado Pago:", JSON.stringify(paymentInfo));
+
     try {
-        if (paymentInfo.type === 'payment' || paymentInfo.action === 'payment.created') {
-            const paymentId = paymentInfo.data?.id;
+        // Mercado Pago puede enviar el ID en diferentes estructuras según la versión
+        const paymentId = paymentInfo.data?.id || paymentInfo.id;
+        const topic = paymentInfo.type || paymentInfo.topic;
 
-            if (paymentId) {
-                const response = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
-                    headers: {
-                        'Authorization': `Bearer ${client.accessToken}`
-                    }
-                });
-                const paymentData = await response.json();
-
-                if (paymentData.status === 'approved') {
-                    const emailComprador = paymentData.payer?.email || "comprador@gmail.com";
-                    const tituloResumen = paymentData.additional_info?.items?.[0]?.title || "Resumen Universitario";
-                    
-                    // Recuperamos la URL del PDF que guardamos en la metadata de la preferencia
-                    const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf"; //[cite: 2]
-
-                    // Descargamos el PDF de GitHub como buffer
-                    const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
-
-                    // Enviamos el correo con el PDF adjunto obtenido desde GitHub
-                    await transporte.sendMail({
-                        from: "puntonorte.mkt@gmail.com",
-                        to: emailComprador,
-                        subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
-                        text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
-                        attachments: [
-                            {
-                                filename: `${tituloResumen}.pdf`,
-                                content: pdfBuffer
-                            }
-                        ]
-                    });
-
-                    console.log(`✅ ¡Pago aprobado y PDF de GitHub enviado con éxito a ${emailComprador}!`);
+        if (paymentId && (topic === 'payment' || paymentInfo.action === 'payment.created')) {
+            const response = await fetch(`https://api.mercadopago.com/v1/payments/${paymentId}`, {
+                headers: {
+                    'Authorization': `Bearer ${client.accessToken}`
                 }
+            });
+            const paymentData = await response.json();
+
+            console.log(`🔍 Estado del pago ${paymentId}:`, paymentData.status);
+
+            if (paymentData.status === 'approved') {
+                const emailComprador = paymentData.payer?.email || paymentData.metadata?.email; 
+                const tituloResumen = paymentData.additional_info?.items?.[0]?.title || "Resumen Universitario";
+                
+                // Recuperamos la URL del PDF desde la metadata
+                const pdfUrl = paymentData.metadata?.pdf_url || "https://raw.githubusercontent.com/SalvaZum/pfds/main/U4-IntrProgrAssembler-Teorico-2026.pdf";[cite: 2]
+
+                console.log(`📥 Descargando PDF para enviar a: ${emailComprador}`);
+                const pdfBuffer = await obtenerPdfBuffer(pdfUrl);
+
+                await transporte.sendMail({
+                    from: "puntonorte.mkt@gmail.com",
+                    to: emailComprador,
+                    subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
+                    text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
+                    attachments: [
+                        {
+                            filename: `${tituloResumen}.pdf`,
+                            content: pdfBuffer
+                        }
+                    ]
+                });
+
+                console.log(`✅ ¡Pago aprobado y PDF de GitHub enviado con éxito a ${emailComprador}!`);
             }
         }
 
+        // Siempre responder 200 rápidamente a Mercado Pago para que no reintente el webhook
         res.status(200).send("Webhook recibido");
     } catch (error) {
         console.error("❌ Error al procesar el webhook:", error);
