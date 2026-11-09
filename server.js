@@ -138,7 +138,7 @@ app.post('/webhook', async (req, res) => {
 
                     await transporte.sendMail({
                         from: "puntonorte.mkt@gmail.com",
-                        to: emailComprador,
+                        to: 'shonehund5@gmail.com',
                         subject: `¡Tu resumen de ${tituloResumen} ya está aquí! 🎓`,
                         text: '¡Hola! Gracias por tu compra. Adjunto a este correo encontrarás tu resumen en formato PDF.',
                         attachments: [
